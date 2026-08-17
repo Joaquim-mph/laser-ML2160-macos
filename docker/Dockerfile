@@ -1,6 +1,6 @@
 # Runs HP's real `rastertospl` (from the Unified Linux Driver) inside a tiny Linux
 # container so it works on macOS. The binary + vendor lib + PPD are copied in by
-# install.sh (they are NOT redistributed in this repo — install.sh fetches the ULD
+# install.sh (they are NOT redistributed in this repo - install.sh fetches the ULD
 # straight from HP).
 FROM ubuntu:22.04
 RUN apt-get update -qq \

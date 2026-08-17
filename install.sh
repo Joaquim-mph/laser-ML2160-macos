@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Native macOS driver installer for the HP Laser 1003–1008 (a/w).
+# Native macOS driver installer for the HP Laser 1003-1008 (a/w).
 # Downloads HP's Unified Linux Driver, runs its real `rastertospl` (SPL3) in a small
 # Linux container via colima, and delivers the job over USB with a root helper daemon
 # so any app can just Cmd-P.  See README.md for how/why.
@@ -20,7 +20,7 @@ case "$(uname -m)" in
   x86_64) ULD_ARCH=x86_64;  PLATFORM=linux/amd64 ;;
   *) die "unsupported arch $(uname -m)";;
 esac
-command -v brew >/dev/null || die "Homebrew required — https://brew.sh"
+command -v brew >/dev/null || die "Homebrew required - https://brew.sh"
 BREW="$(brew --prefix)"
 
 # 1. deps + Linux VM ---------------------------------------------------------
@@ -35,7 +35,7 @@ docker info >/dev/null 2>&1 || die "docker not reachable after 'colima start'."
 # 2. fetch HP's driver (NOT redistributed here) ------------------------------
 say "Downloading HP Unified Linux Driver (contains rastertospl)…"
 TMP="$(mktemp -d)"; trap 'rm -rf "$TMP"' EXIT
-curl -fL --retry 3 -o "$TMP/uld.tgz" "$ULD_URL" || die "ULD download failed (URL may have moved — see README)."
+curl -fL --retry 3 -o "$TMP/uld.tgz" "$ULD_URL" || die "ULD download failed (URL may have moved - see README)."
 tar xzf "$TMP/uld.tgz" -C "$TMP"
 [ -x "$TMP/uld/$ULD_ARCH/rastertospl" ] || die "rastertospl ($ULD_ARCH) missing from ULD."
 
@@ -81,9 +81,9 @@ if mkdir -p "$HOME/Library/LaunchAgents" 2>/dev/null && \
   launchctl bootout "gui/$(id -u)/com.hpl1008.colima" 2>/dev/null || true
   launchctl bootstrap "gui/$(id -u)" "$HOME/Library/LaunchAgents/com.hpl1008.colima.plist" 2>/dev/null \
     && echo "  LaunchAgent installed" \
-    || echo "  couldn't load LaunchAgent — add 'colima start' as a Login Item (see README)."
+    || echo "  couldn't load LaunchAgent - add 'colima start' as a Login Item (see README)."
 else
-  echo "  ~/Library/LaunchAgents not writable (managed Mac?) — add 'colima start' as a Login Item (see README)."
+  echo "  ~/Library/LaunchAgents not writable (managed Mac?) - add 'colima start' as a Login Item (see README)."
 fi
 
 # 8. create the queue --------------------------------------------------------

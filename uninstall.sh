@@ -21,5 +21,5 @@ rm -rf "$HOME/.hp1008"
 docker rmi hp-spl 2>/dev/null || true
 
 echo
-echo "Done. (colima, docker, libusb were left installed — 'brew uninstall' them if you like.)"
+echo "Done. (colima, docker, libusb were left installed - 'brew uninstall' them if you like.)"
 echo "To stop the Linux VM entirely:  colima stop"

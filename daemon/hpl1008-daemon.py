@@ -1,8 +1,8 @@
 #!/usr/bin/python3
-"""hpl1008-daemon — root LaunchDaemon that does the real printing OUTSIDE macOS's
+"""hpl1008-daemon: root LaunchDaemon that does the real printing OUTSIDE macOS's
 CUPS sandbox.
 
-The printer queue's device URI is socket://127.0.0.1:9108, so CUPS's own (sandbox-
+The printer queue's device URI is socket://127.0.0.1:9108, so CUPS's own (sandbox
 blessed) `socket` backend streams each CUPS-raster job to us. We convert it to genuine
 SPL3 with HP's rastertospl (running in a Linux container via colima) and write it to
 the printer over USB. Both steps are forbidden inside a CUPS filter/backend on macOS,
@@ -18,12 +18,34 @@ PY       = f"{USERHOME}/.hp1008/venv/bin/python"
 WRITER   = f"{USERHOME}/.hp1008/direct_write.py"
 LOG      = "/private/tmp/hpl1008-daemon.log"
 PORT     = 9108
-IDLE_END = 2.0        # seconds of silence => the raster burst is complete
+IDLE_END = 2.0          # seconds of silence means the raster burst is complete
+COLIMA_WAIT = 150       # max seconds to wait for the Linux VM to come up (post-reboot)
 os.environ["DOCKER_HOST"] = f"unix://{USERHOME}/.colima/default/docker.sock"
 
 def log(m):
     try: open(LOG, "a").write(f"{time.strftime('%F %T')} {m}\n")
     except Exception: pass
+
+def docker_ready():
+    try:
+        return subprocess.run([DOCKER, "info"], capture_output=True).returncode == 0
+    except Exception:
+        return False
+
+def wait_for_docker():
+    """After a reboot the login item starts colima, which takes ~60s. Rather than
+    erroring, hold the job until the VM is ready (or give up after COLIMA_WAIT)."""
+    if docker_ready():
+        return True
+    log("colima/docker not ready; waiting for it to come up...")
+    start = time.time()
+    while time.time() - start < COLIMA_WAIT:
+        time.sleep(3)
+        if docker_ready():
+            log(f"colima ready after {int(time.time() - start)}s")
+            return True
+    log("gave up waiting for colima")
+    return False
 
 def read_job(conn):
     conn.settimeout(IDLE_END)
@@ -42,6 +64,8 @@ def handle(conn):
     data = read_job(conn)
     log(f"received {len(data)} raster bytes")
     if not data:
+        return
+    if not wait_for_docker():
         return
     try:
         conv = subprocess.run([DOCKER, "run", "-i", "--rm", "hp-spl"],
