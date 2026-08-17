@@ -1,0 +1,18 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <!-- Starts colima at login so the Linux VM that runs HP's codec is ready after a
+       reboot. Installed to ~/Library/LaunchAgents. On managed Macs where that folder
+       is locked, add "colima start" as a Login Item instead (see README). -->
+  <key>Label</key><string>com.hpl1008.colima</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>@@COLIMA@@</string>
+    <string>start</string>
+  </array>
+  <key>RunAtLoad</key><true/>
+  <key>StandardErrorPath</key><string>/private/tmp/hpl1008-colima.log</string>
+  <key>StandardOutPath</key><string>/private/tmp/hpl1008-colima.log</string>
+</dict>
+</plist>
