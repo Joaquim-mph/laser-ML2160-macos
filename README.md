@@ -5,10 +5,11 @@ laser, print from **Apple Silicon macOS** like a normal printer. `Cmd-P` from an
 No terminal, no per-job scripts.
 
 HP never shipped a working macOS driver for these. They are not AirPrint, they do not
-speak PostScript or PCL, and the open-source SPL2/QPDL drivers (splix, foo2zjs) get
-rejected by the printer's SPL3 firmware. So this project runs **HP's own `rastertospl`**,
-the exact codec taken from HP's Unified Linux Driver, inside a tiny Linux container, and
-delivers the result over USB itself.
+speak PostScript or PCL, and the open-source SPL/QPDL drivers (splix, foo2zjs) do not
+produce a stream this unit accepts (I tested current SpliX 2.0.2 too, see
+[What about SpliX?](#what-about-splix) below). So this project runs **HP's own
+`rastertospl`**, the exact codec taken from HP's Unified Linux Driver, inside a tiny
+Linux container, and delivers the result over USB itself.
 
 > Tested on macOS 26 (Apple Silicon). USB-only "a" models and USB-connected "w" models.
 
@@ -45,7 +46,7 @@ The HP Laser 100 series is a genuinely awkward printer on a Mac:
 | --- | --- |
 | AirPrint / driverless | Not offered. The printer's USB HTTP endpoint serves no IPP |
 | Generic PCL / PostScript | Printer speaks neither, so the CUPS backend hangs "offline" |
-| splix (Samsung SPL2/QPDL) | Prints **garbage**, wrong SPL dialect |
+| splix 2.0.1 / 2.0.2 | Garbled: striped raster at the page origin, repeated sheets (tested, see below) |
 | foo2zjs `foo2qpdl` | `SPL ERROR - Please use the proper driver` |
 | HP's macOS driver | Does not exist |
 
@@ -74,6 +75,36 @@ flowchart LR
   the `hp-spl` container to produce real SPL3, and writes it straight to the printer's
   USB bulk endpoint with libusb. Those are the two things the sandbox forbids, done
   outside it.
+
+## What about SpliX?
+
+SpliX **2.0.2** (2026) added HP Laser 10x support: QPDL version 3, a 512-byte packet
+size, and a per-paper band-width table for the Samsung M2020 family, whose printers
+"do not work unless they receive exactly the right band widths."
+
+I tested it properly on the HP Laser 1008a:
+
+* built SpliX 2.0.2 on macOS and confirmed **by source instrumentation** that its
+  band-width table engages and returns the correct value (608 bytes for A4 at 600 dpi);
+* fed the resulting QPDL through the exact same USB path that prints HP's `rastertospl`
+  output correctly.
+
+It still comes out malformed: a striped patch of raster at the top-left of each sheet,
+the page ejects, and the printer believes another page is coming, so it repeats. The
+same raster through HP's own `rastertospl` prints a clean page over the identical
+transport. So this is an encoder problem, not transport.
+
+SpliX's HP 10x support is real, but it targets the Samsung M2020 / HP Laser 103-108 wire
+format (upstream PR #9 even notes the HP models were "not tested"), and the HP Laser
+**1008a** (HP's separate 1003-1008 series) apparently needs something more or different
+in the SPL3 page/band framing that SpliX does not emit. That is why this project uses
+HP's own codec.
+
+**Help wanted.** I built this so my family and I can print from our Macs, and I would
+love a cleaner ending. If you can pin down the exact byte-level difference between HP's
+`rastertospl` output and SpliX's for this printer (band/page records, compression
+selector, page-end / job-end opcodes), SpliX could likely be patched and colima dropped
+entirely. Issues, ideas, and PRs are very welcome.
 
 ## What the installer sets up
 

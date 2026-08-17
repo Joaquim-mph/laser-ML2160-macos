@@ -10,7 +10,7 @@ which is the whole reason this out-of-band daemon exists.
 
 Paths below are filled in by install.sh (@@USERHOME@@ / @@DOCKER@@).
 """
-import socket, subprocess, os, time, tempfile
+import socket, subprocess, os, time
 
 USERHOME = "@@USERHOME@@"
 DOCKER   = "@@DOCKER@@"
@@ -18,7 +18,7 @@ PY       = f"{USERHOME}/.hp1008/venv/bin/python"
 WRITER   = f"{USERHOME}/.hp1008/direct_write.py"
 LOG      = "/private/tmp/hpl1008-daemon.log"
 PORT     = 9108
-IDLE_END = 2.0          # seconds of silence means the raster burst is complete
+JOB_TIMEOUT = 30        # safety net; the socket backend closes at end-of-job (EOF)
 COLIMA_WAIT = 150       # max seconds to wait for the Linux VM to come up (post-reboot)
 os.environ["DOCKER_HOST"] = f"unix://{USERHOME}/.colima/default/docker.sock"
 
@@ -48,15 +48,17 @@ def wait_for_docker():
     return False
 
 def read_job(conn):
-    conn.settimeout(IDLE_END)
+    """Read the whole job. End-of-job is the socket backend closing the connection
+    (EOF); the timeout is only a safety net against a dead peer."""
+    conn.settimeout(JOB_TIMEOUT)
     data = b""
     while True:
         try:
             chunk = conn.recv(1 << 16)
         except socket.timeout:
-            if data: break
-            continue
-        if not chunk: break
+            break
+        if not chunk:      # EOF => end of job
+            break
         data += chunk
     return data
 
@@ -72,12 +74,9 @@ def handle(conn):
                               input=data, capture_output=True)
         if conv.returncode != 0:
             log("rastertospl failed: " + conv.stderr.decode(errors="replace")[:200]); return
-        with tempfile.NamedTemporaryFile(suffix=".spl3", delete=False) as f:
-            f.write(conv.stdout); spl = f.name
-        w = subprocess.run([PY, WRITER, spl], capture_output=True)
-        os.unlink(spl)
+        w = subprocess.run([PY, WRITER, "-"], input=conv.stdout, capture_output=True)
         if w.returncode == 0:
-            log(f"printed ok ({len(conv.stdout)} SPL3 bytes)")
+            log(f"printed ok ({len(conv.stdout)} SPL bytes)")
         else:
             log("USB write failed: " + (w.stdout + w.stderr).decode(errors="replace")[:200])
     except Exception as e:
