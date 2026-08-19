@@ -11,14 +11,22 @@ produce a stream this exact unit accepts. This project fixes that with a small p
 
 > Tested on macOS 26 (Apple Silicon). USB-connected 1003 / 1006 / 1008 (a and w).
 
-## UPDATE: this driver is now fully native
+## UPDATE: this driver is now fully native (and that is what we run)
 
-Earlier versions ran HP's proprietary Linux `rastertospl` inside a Docker/colima Linux VM
-(the only thing that produced correct output at the time). **That is gone.** We reverse
-engineered the actual problem (see [The story](#the-story)), fixed it in SpliX with a
-10-line patch, and confirmed a clean print. The driver is now a native, GPL, patched
-**SpliX `rastertoqpdl`** CUPS filter plus a tiny USB helper. **No Docker, no colima, no
-Linux VM, no vendor binary.** The fix is being upstreamed to SpliX ([issue #1](https://github.com/Kuberwastaken/hp-laser-1008a-macos/issues/1)).
+It got progressively more native, and the current version is the real deal:
+
+1. **First** it ran HP's proprietary Linux `rastertospl` inside a Docker/colima Linux VM
+   (the only thing that produced correct output at the time).
+2. **Then** we reverse engineered the actual bug (see [The story](#the-story)), fixed it
+   in SpliX with a 10-line patch, and dropped Docker/colima/ULD entirely.
+3. **Now** the USB write is a tiny native **IOKit** helper too, so **Python, pyusb, and
+   libusb are gone as well**.
+
+**This is what the repo ships and what we use.** The entire runtime is two compiled
+pieces on Apple's own frameworks: a patched SpliX `rastertoqpdl` CUPS filter (C++, system
+`libcups`) and `hpl1008-usbd` (C, `IOKit` + `CoreFoundation`). No Docker, no VM, no vendor
+binary, no Python, no Homebrew libraries. The SPL3 fix is being upstreamed to SpliX
+([issue #1](https://github.com/Kuberwastaken/hp-laser-1008a-macos/issues/1)).
 
 ## Install (one command)
 
@@ -28,9 +36,9 @@ Plug the printer in over USB, then paste this into Terminal:
 git clone https://github.com/Kuberwastaken/hp-laser-1008a-macos.git && cd hp-laser-1008a-macos && ./install.sh
 ```
 
-It asks for your password once, builds the patched SpliX filter, and sets up the printer
-as **"HP Laser 1008a"**. Print to it from any app with `Cmd-P`. Prerequisites: [Homebrew](https://brew.sh)
-and the Xcode command line tools (`xcode-select --install`).
+It asks for your password once, builds the two native binaries, and sets up the printer
+as **"HP Laser 1008a"**. Print from any app with `Cmd-P`. Prerequisites: [Homebrew](https://brew.sh)
+and the Xcode command line tools (`xcode-select --install`), both build-time only.
 
 Test from the terminal: `lp -d HP_Laser_1008a /etc/hosts`. Remove everything: `./uninstall.sh`.
 
@@ -40,18 +48,19 @@ Test from the terminal: `lp -d HP_Laser_1008a /etc/hosts`. Remove everything: `.
 flowchart LR
     A[Any app, Cmd-P] --> B[CUPS]
     B --> C[cgpdftoraster<br/>CUPS raster]
-    C --> D[rastertoqpdl<br/>patched SpliX, native]
+    C --> D[rastertoqpdl<br/>patched SpliX, C++]
     D -->|SPL3 / QPDL| E[socket 127.0.0.1:9108]
-    E --> F[hpl1008-daemon<br/>root, USB bridge]
-    F -->|libusb bulk write| G[(HP Laser 1008a)]
+    E --> F[hpl1008-usbd<br/>C + IOKit, root]
+    F -->|USB bulk write| G[(HP Laser 1008a)]
 ```
 
 The one non-obvious piece is the daemon. macOS forbids USB access inside a CUPS
 filter/backend (a hardened sandbox), and on recent macOS only **root** can drive USB at
 all. Its own `usb` backend also refuses this printer (it mis-reads the port status as
 permanently "offline"). So the queue streams the finished SPL3 to a small root
-LaunchDaemon over localhost, and that daemon does the raw `libusb` write. Everything
-upstream of it is a normal native CUPS filter.
+LaunchDaemon over localhost, and that daemon does the raw USB write with `IOKit`
+(`IOUSBInterfaceOpenSeize` + `WritePipe`). Everything upstream of it is a normal native
+CUPS filter.
 
 ## The story
 
@@ -87,9 +96,8 @@ to JBIG. The fix (`patches/300dpi-header.patch`) decouples it and gates it on
 
 * **First print after idle is slow (~10-15s).** That is the printer waking from its
   aggressive auto-power-off and heating the fuser, not the software.
-* **Different USB product id?** If `~/.hp1008/direct_write.py` says "printer not found"
-  while `ioreg -p IOUSB -l | grep -iA2 "HP Laser"` shows the device, it auto-discovers by
-  descriptor, but you can pin `KNOWN_PIDS` in that file.
+* **Different USB product id?** `hpl1008-usbd` matches HP vendor `0x03F0` and the classic
+  printer-class interface by descriptor, so other 1003/1008 PIDs work as-is.
 * **Logs:** `/private/tmp/hpl1008-daemon.log`.
 
 ## Credits
