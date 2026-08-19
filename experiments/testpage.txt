@@ -1,0 +1,17 @@
+========================================================
+   HP Laser 1008a  --  fully NATIVE macOS driver  (V2)
+========================================================
+
+If you can read this, the V2 backend path works:
+
+  Cmd-P  ->  CUPS  ->  rastertoqpdl (patched SpliX, C++)
+         ->  hpl100x backend (native C + IOKit)  ->  USB
+
+No localhost socket. No LaunchDaemon. No Docker, no
+colima, no Python, no libusb, no vendor binary. CUPS
+hands the job straight to the native backend, which
+drives the USB bulk-OUT endpoint itself.
+
+The quick brown fox jumps over the lazy dog. 0123456789
+ABCDEFGHIJKLMNOPQRSTUVWXYZ  !@#$%^&*()  the end.
+========================================================
