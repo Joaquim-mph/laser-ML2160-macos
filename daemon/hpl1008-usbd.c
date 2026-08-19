@@ -189,12 +189,18 @@ static unsigned char *read_all(int fd, size_t *outlen) {
 }
 
 int main(int argc, char **argv) {
-    const char *base = strrchr(argv[0], '/'); base = base ? base + 1 : argv[0];
-
     // --- CUPS backend mode (installed as /usr/libexec/cups/backend/hpl100x) ---
     // Deletes the socket + LaunchDaemon: CUPS invokes this as the device transport
     // stage directly. argv = job user title copies options [file]; job data on stdin.
-    if (strstr(base, "hpl100x")) {
+    //
+    // Detecting backend mode is subtle: for a PRINT job CUPS sets argv[0] to the DEVICE
+    // URI ("hpl100x:/"), not the executable path, so a basename match fails (it ends in
+    // '/'). Match the whole argv[0] AND the DEVICE_URI env var (set to the queue's URI for
+    // every backend invocation) so both discovery (argv[0]=path) and printing are caught.
+    const char *uri = getenv("DEVICE_URI");
+    int as_backend = strstr(argv[0], "hpl100x") != NULL ||
+                     (uri && strstr(uri, "hpl100x") != NULL);
+    if (as_backend) {
         g_backend = 1;     // route all logmsg() to stderr (sandbox blocks the /tmp log)
         if (argc == 1) {   // discovery
             printf("direct hpl100x:/ \"HP Laser 1008a\" \"HP Laser 1003-1008 (native IOKit)\" "
