@@ -1,5 +1,0 @@
-#!/bin/sh
-# No-op CUPS filter: makes the queue's final output type application/vnd.cups-raster
-# so CUPS's socket backend streams raw CUPS raster to the daemon (which does the real
-# raster->SPL3 conversion outside the sandbox).
-exec cat

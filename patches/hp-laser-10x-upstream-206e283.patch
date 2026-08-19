@@ -1,0 +1,355 @@
+From 206e283bbc427435e907d86222bd4d79c43feca6 Mon Sep 17 00:00:00 2001
+From: ValdikSS <iam@valdikss.org.ru>
+Date: Wed, 8 Oct 2025 01:20:39 +0300
+Subject: [PATCH] Add support for Samsung M2020 series, HP Laser 10x, Laser MFP
+ 13x (#9)
+
+- Limit the bandwidth to make Samsung M2026 work
+- Introduce PPD QPDL->SpecialBandWidth boolean for Samsung M2020 Series
+- Add Samsung M2020 Series to samsung.drv and Makefile
+- Add HP Laser 103/107/108, HP Laser MFP 135/137 support (Samsung M2020)
+- Use HP Laser name attributes from the original (proprietary hp-uld driver) PPD file
+---
+ include/printer.h  |  6 ++++
+ ppd/Makefile       | 26 ++++++++++++++---
+ ppd/hp.drv.in      | 50 ++++++++++++++++++++++++++++++++
+ ppd/samsung.drv.in |  9 +++++-
+ src/compress.cpp   | 72 +++++++++++++++++++++++++++++++++++++---------
+ src/printer.cpp    |  1 +
+ 6 files changed, 146 insertions(+), 18 deletions(-)
+ create mode 100644 ppd/hp.drv.in
+
+diff --git a/include/printer.h b/include/printer.h
+index 46b30e40..20345308 100644
+--- a/include/printer.h
++++ b/include/printer.h
+@@ -39,6 +39,7 @@ class Printer
+         bool                    _color;
+         unsigned long           _qpdlVersion;
+         unsigned long           _bandHeight;
++        bool                    _specialBandWidth;
+         unsigned long           _packetSize;
+ 
+         unsigned char           _paperType;
+@@ -106,6 +107,11 @@ class Printer
+           * @return the height of a band.
+           */ 
+         unsigned long           bandHeight() const {return _bandHeight;}
++        /**
++         * @return TRUE if the printer requires special BandWidth selection
++         *         code (Samsung M2020 Series). Otherwise it returns FALSE.
++         */
++        bool                    specialBandWidth() const {return _specialBandWidth;}
+         /**
+           * @return the maximum size of a packet.
+           */ 
+diff --git a/ppd/Makefile b/ppd/Makefile
+index 1d02f6b8..b40e7d8c 100644
+--- a/ppd/Makefile
++++ b/ppd/Makefile
+@@ -5,10 +5,11 @@
+ #
+ #
+ 
+-SOURCE		:= samsung.drv.in dell.drv.in xerox.drv.in lexmark.drv.in toshiba.drv.in
+-DRVS		:= samsung.drv dell.drv xerox.drv lexmark.drv toshiba.drv
++SOURCE		:= samsung.drv.in dell.drv.in xerox.drv.in lexmark.drv.in toshiba.drv.in hp.drv.in
++DRVS		:= samsung.drv dell.drv xerox.drv lexmark.drv toshiba.drv hp.drv
++HP		:= laser10x laser13x
+ DELL		:= 1100 1110
+-SAMSUNG		:= clp500 clp550 clp510 ml1510 ml1520 ml1610 \
++SAMSUNG		:= clp500 clp550 clp510 m2020 ml1510 ml1520 ml1610 \
+                    ml1630 ml1640 ml1660 ml1710 ml1740 ml1750 ml1910 ml1915 \
+                    ml2010 ml2015 ml2150 ml2160 ml2165 ml2240 ml2250 ml2251 \
+                    ml2510 ml2525 ml2525w ml2550 ml2571 ml2580 ml2580n ml3050 \
+@@ -31,7 +32,7 @@ SAMSUNG 	+= clp200 clp300 clp310 clp315 clp310n clp600 clx216x clx2170 \
+                    clx3160
+ XEROX		+= ph6110
+ endif
+-DRIVERS		:= $(DELL) $(SAMSUNG) $(XEROX) $(LEXMARK) $(TOSHIBA)
++DRIVERS		:= $(DELL) $(SAMSUNG) $(XEROX) $(LEXMARK) $(TOSHIBA) $(HP)
+ 
+ # === DON'T CHANGE ANYTHING AFTER THIS MESSAGE ====
+ 
+@@ -51,6 +52,7 @@ drv: $(SOURCE)
+ 	./compile.sh xerox.drv.in drv
+ 	./compile.sh lexmark.drv.in drv
+ 	./compile.sh toshiba.drv.in drv
++	./compile.sh hp.drv.in drv
+ 
+ .PHONY: ppd
+ ppd: $(DRIVER) $(LANGDRIVERSEXT)
+@@ -61,6 +63,7 @@ $(DRIVER): $(SOURCE)
+ 	./compile.sh xerox.drv.in -I . -d ./
+ 	./compile.sh lexmark.drv.in -I . -d ./
+ 	./compile.sh toshiba.drv.in -I . -d ./
++	./compile.sh hp.drv.in -I . -d ./
+ 
+ $(LANGDRIVERSEXT): $(SOURCE) $(patsubst %, $(PODIR)/%.$(POEXT), $(LANGUAGES))
+ 	lang=$(patsubst $(MASTERDRIVER)%.$(DRIVERSEXT),%, $@); \
+@@ -88,6 +91,11 @@ $(LANGDRIVERSEXT): $(SOURCE) $(patsubst %, $(PODIR)/%.$(POEXT), $(LANGUAGES))
+ 	for filename in ${TOSHIBA}; do \
+ 		recode utf8..latin1 ${PODIR}/$$lang/$$filename.${DRIVERSEXT}; \
+ 		mv ${PODIR}/$$lang/$$filename.${DRIVERSEXT} $$filename$$lang.${DRIVERSEXT}; \
++	done; \
++	./compile.sh hp.drv.in -l $$lang -c ${PODIR}/$$lang.${POEXT} -d ${PODIR}/$$lang; \
++	for filename in ${HP}; do \
++		recode utf8..latin1 ${PODIR}/$$lang/$$filename.${DRIVERSEXT}; \
++		mv ${PODIR}/$$lang/$$filename.${DRIVERSEXT} $$filename$$lang.${DRIVERSEXT}; \
+ 	done;
+ 
+ .PHONY: update
+@@ -98,12 +106,14 @@ update: $(patsubst %, $(PODIR)/%.$(POEXT), $(LANGUAGES))
+ 	./compile.sh xerox.drv.in lang $@
+ 	./compile.sh lexmark.drv.in lang $@
+ 	./compile.sh toshiba.drv.in lang $@
++	./compile.sh hp.drv.in lang $@
+ 
+ cmd_install_samsung	= INSTALL           Samsung PPD files
+ cmd_install_xerox	= INSTALL           Xerox PPD files
+ cmd_install_dell	= INSTALL           Dell PPD files
+ cmd_install_lexmark	= INSTALL           Lexmark PPD files
+ cmd_install_toshiba	= INSTALL           Toshiba PPD files
++cmd_install_hp		= INSTALL           HP PPD files
+ cmd_install_drv		= INSTALL           DRV files
+ .PHONY: install
+ install:
+@@ -148,6 +158,14 @@ ifneq  ($(DRV_ONLY),1)
+ 			install -m 644 $$filename$$lang.${DRIVERSEXT} ${DESTDIR}${CUPSPPD}/toshiba;\
+ 		done; \
+ 	done;
++	$(call printCmd, $(cmd_install_hp))
++	$(Q)install -d -m 755 ${DESTDIR}${CUPSPPD}/hp
++	$(Q)for filename in ${HP}; do \
++		install -m 644 $$filename.${DRIVERSEXT} ${DESTDIR}${CUPSPPD}/hp;\
++		for lang in ${LANGUAGES}; do \
++			install -m 644 $$filename$$lang.${DRIVERSEXT} ${DESTDIR}${CUPSPPD}/hp;\
++		done; \
++	done;
+ else
+ 	$(call printCmd, $(cmd_install_drv))
+ 	$(Q)install -d -m 755 ${DESTDIR}${CUPSDRV}
+diff --git a/ppd/hp.drv.in b/ppd/hp.drv.in
+new file mode 100644
+index 00000000..1fc75312
+--- /dev/null
++++ b/ppd/hp.drv.in
+@@ -0,0 +1,50 @@
++/*
++ *      hp.drv                       (C) 2025, ValdikSS
++ * 
++ * Contains the hp laser printers drivers
++ *
++ * $Id$
++ */
++
++Manufacturer "HP"
++
++#import "version.defs"
++#import "altitude.defs"
++
++HWMargins 12.5 12.5 12.5 12.5
++#import "spl2basic.defs"
++#import "filter.defs"
++#import "powersave.defs"
++#import "tonerdensity.defs"
++#import "tonersave.defs"
++#import "jamrecovery.defs"
++#import "monochrome-v2.defs"
++
++{
++    Attribute QPDL QPDLVersion "3"
++    Attribute General DocHeaderValues "<0><0><1>"
++    {
++        {
++            Resolution k 1 0 0 0 "1200dpi/1200 DPI"
++            Throughput "21"
++            Attribute QPDL PacketSize "512"
++            Attribute QPDL SpecialBandWidth "True"
++            #import "manualduplex.defs"
++            {
++                ModelName "HP Laser 10x Series"
++                Attribute Product "" "(LaserPrinter)"
++                Attribute ShortNickName "" "10x"
++                PCFileName "laser10x.ppd"
++            } {
++                ModelName "HP Laser MFP 13x Series"
++                Attribute Product "" "(LaserMFP)"
++                Attribute ShortNickName "" "13x"
++                PCFileName "laser13x.ppd"
++            }
++
++        }
++    }
++}
++
++/* vim: set expandtab tabstop=4 shiftwidth=4 smarttab tw=80 enc=utf8: */
++
+diff --git a/ppd/samsung.drv.in b/ppd/samsung.drv.in
+index 21392dfd..a6ff3c0d 100644
+--- a/ppd/samsung.drv.in
++++ b/ppd/samsung.drv.in
+@@ -312,7 +312,14 @@ Manufacturer "Samsung"
+ 
+                     ModelName "ML-2165"
+                     PCFileName "ml2165.ppd"
+-	        }
++                } {
++                    Throughput "21"
++                    Attribute QPDL PacketSize "512"
++                    Attribute QPDL SpecialBandWidth "True"
++
++                    ModelName "M2020 Series"
++                    PCFileName "m2020.ppd"
++                }
+             }
+ 	}
+     }
+diff --git a/src/compress.cpp b/src/compress.cpp
+index 5572e64c..7d5d2a23 100644
+--- a/src/compress.cpp
++++ b/src/compress.cpp
+@@ -33,6 +33,44 @@
+ #include "algo0x13.h"
+ #include "algo0x15.h"
+ 
++/*
++ * Look up bandwidths in bytes generated by Samsung ULD for 2020 series
++ * Samsung M2026 does not work unless it receives _exactly_ the right bandwidths
++ * There does not seem to be a general formula for all paper sizes, hence simple lookup
++ */
++unsigned long _get2020BandWidthInB(unsigned char papertype, unsigned long xresolution) {
++    struct Bw {
++        unsigned char papertype;
++        unsigned long width[2];  //standard and high resolution
++    };
++
++    const Bw bw[] = {
++        {0,640,1248},  //letter
++        {1,640,1248},  //legal
++        {2,608,1216},	//a4
++        {3,544,1056}, 	//executive
++        {6,288,576},	//Env10
++        {7,288,544},	//monarch envelope
++        {8,480,928},	//c5 envelope
++        {9,320,608},	//DL envelope
++        {11,544,1056},	//b5
++        {12,512,992},	//b5 iso envelope
++        {14,288,576},	//postcard 4x6
++        {16,416,832},	//a5
++        {24,640,1248},	//folio
++        {28,640,1248}	//Oficio
++    };
++
++    for (unsigned int i=0; i<sizeof(bw)/sizeof(bw[0]); i++) {
++        if (bw[i].papertype == papertype) {
++            if (xresolution == 600) return bw[i].width[0];
++            if (xresolution == 1200) return bw[i].width[1];
++            break;
++        }
++    }
++    return 0;
++}
++
+ static bool _isEmptyBand(unsigned char* band, unsigned long size)
+ {
+     unsigned long max, mod;
+@@ -53,6 +91,7 @@ static bool _isEmptyBand(unsigned char* band, unsigned long size)
+ static bool _compressBandedPage(const Request& request, Page* page)
+ {
+     unsigned long index=0, pageHeight, pageWidth, lineWidthInB, bandHeight;
++    unsigned long bandWidth, bandWidthInB;
+     unsigned long bandSize, hardMarginX, hardMarginXInB, hardMarginY;
+     unsigned char *planes[4], *band;
+     unsigned long bandNumber=0;
+@@ -72,7 +111,16 @@ static bool _compressBandedPage(const Request& request, Page* page)
+     bandHeight = request.printer()->bandHeight();
+     if (page->xResolution() == 300 && page->yResolution() == 300)
+         bandHeight /= 2;
+-    bandSize = lineWidthInB * bandHeight;
++
++    //Patch for Samsung M2026
++    if (request.printer()->specialBandWidth()) {
++        bandWidthInB = _get2020BandWidthInB(request.printer()->paperType(), page->xResolution());
++        if (!bandWidthInB) bandWidthInB = lineWidthInB;
++    }
++    else bandWidthInB = lineWidthInB;  //original assumption before M2026 patch
++    bandWidth = bandWidthInB * 8;
++    bandSize = bandWidthInB * bandHeight;
++
+     index = hardMarginY * lineWidthInB;
+     band = new unsigned char[bandSize];
+     for (unsigned int i=0; i < colors; i++)
+@@ -121,20 +169,18 @@ static bool _compressBandedPage(const Request& request, Page* page)
+             // Copy the data into the band depending on the algorithm options
+             if (algo->reverseLineColumn()) {
+                 for (unsigned int y=0; y < localHeight; y++) {
+-                    for (unsigned int x=0; x < lineWidthInB - hardMarginXInB; x++) {
+-                        band[x * bandHeight + y] = planes[i][index + x +
+-                            hardMarginXInB + y * lineWidthInB];
++                    for (unsigned int x=0; (x < lineWidthInB - hardMarginXInB) && (x < bandWidthInB); x++) {
++                        band[x * bandHeight + y] = planes[i][index + x + hardMarginXInB + y * lineWidthInB]; // ERR?
+                     }
+-                    for (unsigned int x=lineWidthInB - hardMarginXInB; x < lineWidthInB; x++)
++                    for (unsigned int x=lineWidthInB - hardMarginXInB; x < bandWidthInB; x++)
+                         band[x * bandHeight + y] = 0;
+                 }
+             } else {
+                 for (unsigned int y=0; y < localHeight; y++) {
+-                    for (unsigned int x=0; x < lineWidthInB - hardMarginXInB; x++) {
+-                        band[x + y * lineWidthInB] = planes[i][index + x +
+-                            hardMarginXInB + y * lineWidthInB];
++                    for (unsigned int x=0; (x < lineWidthInB - hardMarginXInB) && (x < bandWidthInB); x++) {
++                        band[x + y * bandWidthInB] = planes[i][index + x + hardMarginXInB + y * lineWidthInB];
+                     }
+-                    for (unsigned int x=lineWidthInB - hardMarginXInB; x < lineWidthInB; x++)
++                    for (unsigned int x=lineWidthInB - hardMarginXInB; x < bandWidthInB; x++)
+                         band[x + y * lineWidthInB]  = 0;
+                 }
+             }
+@@ -151,7 +197,7 @@ static bool _compressBandedPage(const Request& request, Page* page)
+                     band[j] = ~band[j];
+ 
+             // Call the compression method
+-            plane = algo->compress(request, band, pageWidth, bandHeight);
++            plane = algo->compress(request, band, bandWidth, bandHeight);
+             /*
+              * If algorithm 0xd did not create a plane, it means that the 
+              * complementary algorithm 0xE need to be used
+@@ -163,13 +209,13 @@ static bool _compressBandedPage(const Request& request, Page* page)
+                 for (unsigned int j = 0; j < bandSize; j++)
+                     band[j] = ~band[j];
+                 /* Do the encoding with algo0xe. */
+-                plane = algo->compress(request, band, pageWidth, bandHeight);
++                plane = algo->compress(request, band, bandWidth, bandHeight);
+             }
+ 
+             if (plane) {
+                 plane->setColorNr(i + 1);
+                 if (!current)
+-                    current = new Band(bandNumber, pageWidth, bandHeight);
++                    current = new Band(bandNumber, bandWidth, bandHeight);
+                 current->registerPlane(plane);
+             }
+ 
+@@ -178,7 +224,7 @@ static bool _compressBandedPage(const Request& request, Page* page)
+         if (current)
+             page->registerBand(current);
+         bandNumber++;
+-        index += bandSize;
++        index += lineWidthInB * bandHeight;
+         pageHeight = theEnd ? 0 : pageHeight - bandHeight;
+     }
+     page->flushPlanes();
+diff --git a/src/printer.cpp b/src/printer.cpp
+index d8353b08..c4901cb0 100644
+--- a/src/printer.cpp
++++ b/src/printer.cpp
+@@ -68,6 +68,7 @@ bool Printer::loadInformation(const Request& request)
+         return false;
+     }
+     _bandHeight = request.ppd()->get("BandSize", "QPDL");
++    _specialBandWidth = request.ppd()->get("SpecialBandWidth", "QPDL");
+     _packetSize = request.ppd()->get("PacketSize", "QPDL");
+     _packetSize *= 1024;
+     _manufacturer = request.ppd()->get("Manufacturer").deepCopy();

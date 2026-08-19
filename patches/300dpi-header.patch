@@ -1,0 +1,26 @@
+diff --git a/src/qpdl.cpp b/src/qpdl.cpp
+index 2cd254d..2a25519 100644
+--- a/src/qpdl.cpp
++++ b/src/qpdl.cpp
+@@ -374,15 +374,18 @@ bool renderPage(const Request& request, Page* page, bool lastPage)
+     }
+     // For CLP-310/315 printers, multiply page dimensions in inches by 300.
+     // Also selects the appropriate band render function.
+-    if (0x15 == page->compression()) {
++    // 300-dpi printable-size header: needed by CLP-310/315 (compression 0x15) AND by the
++    // Samsung M2020 / HP Laser 10x class (specialBandWidth), whose firmware reads the header
++    // size on a 300-dpi grid regardless of raster resolution. Emitting the true 600-dpi size
++    // makes them treat the page as huge and eject a striped sheet per band. Bands stay 0x11.
++    if (0x15 == page->compression() || request.printer()->specialBandWidth()) {
+         width = ceil(300 * (request.printer()->pageWidth() / 72.0));
+         height = ceil(300 * (request.printer()->pageHeight() / 72.0));
+-        selectedRenderBand = &_renderJBIGBand;
+     } else {
+         width = page->width();
+         height = page->height();
+-        selectedRenderBand = &_renderBand;
+     }
++    selectedRenderBand = (0x15 == page->compression()) ? &_renderJBIGBand : &_renderBand;
+     // Send the page header
+     header[0x0] = 0;                                // Signature
+     header[0x1] = page->yResolution() / 100;        // Y Resolution

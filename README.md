@@ -1,148 +1,104 @@
 # HP Laser 1008a on macOS (native Cmd-P driver)
 
-Make the **HP Laser 1003 / 1006 / 1008 (a/w)**, which is HP's rebadged Samsung SPL3
-laser, print from **Apple Silicon macOS** like a normal printer. `Cmd-P` from any app.
-No terminal, no per-job scripts.
+Make the **HP Laser 1003 / 1006 / 1008 (a/w)**, HP's rebadged Samsung SPL3 laser, print
+from **Apple Silicon macOS** like a normal printer. `Cmd-P` from any app. No terminal,
+no per-job scripts.
 
 HP never shipped a working macOS driver for these. They are not AirPrint, they do not
-speak PostScript or PCL, and the open-source SPL/QPDL drivers (splix, foo2zjs) do not
-produce a stream this unit accepts (I tested current SpliX 2.0.2 too, see
-[What about SpliX?](#what-about-splix) below). So this project runs **HP's own
-`rastertospl`**, the exact codec taken from HP's Unified Linux Driver, inside a tiny
-Linux container, and delivers the result over USB itself.
+speak PostScript or PCL, and until recently the open-source SPL/QPDL drivers did not
+produce a stream this exact unit accepts. This project fixes that with a small patch to
+**SpliX** and drives the printer natively.
 
-> Tested on macOS 26 (Apple Silicon). USB-only "a" models and USB-connected "w" models.
+> Tested on macOS 26 (Apple Silicon). USB-connected 1003 / 1006 / 1008 (a and w).
 
-## Install (the whole thing, one command)
+## UPDATE: this driver is now fully native
 
-Plug the printer in over USB, then paste this into Terminal and press return:
+Earlier versions ran HP's proprietary Linux `rastertospl` inside a Docker/colima Linux VM
+(the only thing that produced correct output at the time). **That is gone.** We reverse
+engineered the actual problem (see [The story](#the-story)), fixed it in SpliX with a
+10-line patch, and confirmed a clean print. The driver is now a native, GPL, patched
+**SpliX `rastertoqpdl`** CUPS filter plus a tiny USB helper. **No Docker, no colima, no
+Linux VM, no vendor binary.** The fix is being upstreamed to SpliX ([issue #1](https://github.com/Kuberwastaken/hp-laser-1008a-macos/issues/1)).
+
+## Install (one command)
+
+Plug the printer in over USB, then paste this into Terminal:
 
 ```bash
 git clone https://github.com/Kuberwastaken/hp-laser-1008a-macos.git && cd hp-laser-1008a-macos && ./install.sh
 ```
 
-That is it. It will ask for your Mac password once, set everything up, and your printer
-appears as **"HP Laser 1008a"**. Print to it from any app with `Cmd-P`.
+It asks for your password once, builds the patched SpliX filter, and sets up the printer
+as **"HP Laser 1008a"**. Print to it from any app with `Cmd-P`. Prerequisites: [Homebrew](https://brew.sh)
+and the Xcode command line tools (`xcode-select --install`).
 
-The only prerequisite is [Homebrew](https://brew.sh) (Apple's package manager). If you
-do not have it, install it first by pasting the one line from that page, then run the
-command above.
+Test from the terminal: `lp -d HP_Laser_1008a /etc/hosts`. Remove everything: `./uninstall.sh`.
 
-To test from the terminal instead:
+## How it works
 
-```bash
-lp -d HP_Laser_1008a /etc/hosts
+```mermaid
+flowchart LR
+    A[Any app, Cmd-P] --> B[CUPS]
+    B --> C[cgpdftoraster<br/>CUPS raster]
+    C --> D[rastertoqpdl<br/>patched SpliX, native]
+    D -->|SPL3 / QPDL| E[socket 127.0.0.1:9108]
+    E --> F[hpl1008-daemon<br/>root, USB bridge]
+    F -->|libusb bulk write| G[(HP Laser 1008a)]
 ```
 
-To remove everything later: `./uninstall.sh`.
+The one non-obvious piece is the daemon. macOS forbids USB access inside a CUPS
+filter/backend (a hardened sandbox), and on recent macOS only **root** can drive USB at
+all. Its own `usb` backend also refuses this printer (it mis-reads the port status as
+permanently "offline"). So the queue streams the finished SPL3 to a small root
+LaunchDaemon over localhost, and that daemon does the raw `libusb` write. Everything
+upstream of it is a normal native CUPS filter.
 
----
-
-## Why this is weird (and how it works)
+## The story
 
 The HP Laser 100 series is a genuinely awkward printer on a Mac:
 
 | What you'd try | What happens |
 | --- | --- |
-| AirPrint / driverless | Not offered. The printer's USB HTTP endpoint serves no IPP |
-| Generic PCL / PostScript | Printer speaks neither, so the CUPS backend hangs "offline" |
-| splix 2.0.1 / 2.0.2 | Garbled: striped raster at the page origin, repeated sheets (tested, see below) |
-| foo2zjs `foo2qpdl` | `SPL ERROR - Please use the proper driver` |
+| AirPrint / driverless | Not offered. Its USB HTTP endpoint serves no IPP |
+| Generic PCL / PostScript | Printer speaks neither, the CUPS backend hangs "offline" |
+| SpliX 2.0.1 | No HP Laser 10x support at all |
+| SpliX 2.0.2 (out of the box) | Garbled: striped raster at the page origin, repeated sheets |
 | HP's macOS driver | Does not exist |
 
-The printer literally asks for "the proper driver." That driver exists as an **x86 and
-arm64 Linux binary** (`rastertospl`) in HP's Unified Linux Driver. It cannot run on
-macOS directly, but it runs natively in a Linux ARM64 container.
+SpliX 2.0.2 added HP Laser 10x support (QPDL v3, a band-width table), but on the 1008a it
+still printed a striped patch at the top-left of every sheet and then ejected and
+repeated. We diagnosed it without the printer by feeding an identical raster through both
+HP's `rastertospl` and SpliX and diffing the output:
 
-There is a second wall: even with correct SPL3, macOS's `usb` backend refuses to send to
-this printer (it mis-reads the USB port status as permanently "offline"), and on recent
-macOS only **root** can talk to USB at all. And CUPS filters/backends run in a
-**mandatory sandbox** that blocks both the container and USB. So the pipeline is split:
+- The band records were **identical** (4864x128, compression 0x11), differing only in the
+  lossless compressed bytes, so the printer decodes them the same. A red herring.
+- The one real difference was the **page-header geometry unit**: HP emits `2480 x 3507`
+  (a 300-dpi grid), SpliX emitted `4960 x 6912` (600-dpi). This printer reads the header
+  size on a 300-dpi grid, so SpliX's value looked like a ~16 x 23 inch page. It laid one
+  band at the top, hit the real A4 edge, ejected, believed a giant page remained, and
+  repeated. Exactly the symptom.
 
-```mermaid
-flowchart LR
-    A[Any app, Cmd-P] --> B[CUPS queue<br/>HP_Laser_10x PPD]
-    B -->|CUPS raster| C[socket backend<br/>127.0.0.1:9108]
-    C --> D[hpl1008-daemon<br/>root, outside sandbox]
-    D -->|raster| E[HP rastertospl<br/>in colima container]
-    E -->|genuine SPL3| D
-    D -->|libusb bulk write| F[(HP Laser 1008a)]
-```
+HP's own binary confirmed it: disassembling `rastertospl` shows it computes the header as
+`points * 300.0 / 72.0`. SpliX already had that 300-dpi code; it was just wrongly coupled
+to JBIG. The fix (`patches/300dpi-header.patch`) decouples it and gates it on
+`specialBandWidth`, which is already true for these models. Bands stay 0x11. Ten lines.
 
-* The **CUPS queue** renders to CUPS raster and streams it to `socket://127.0.0.1:9108`
-  using CUPS's own (sandbox-allowed) `socket` backend.
-* A **root LaunchDaemon** listens there, runs the raster through HP's `rastertospl` in
-  the `hp-spl` container to produce real SPL3, and writes it straight to the printer's
-  USB bulk endpoint with libusb. Those are the two things the sandbox forbids, done
-  outside it.
+## Notes
 
-## What about SpliX?
-
-SpliX **2.0.2** (2026) added HP Laser 10x support: QPDL version 3, a 512-byte packet
-size, and a per-paper band-width table for the Samsung M2020 family, whose printers
-"do not work unless they receive exactly the right band widths."
-
-I tested it properly on the HP Laser 1008a:
-
-* built SpliX 2.0.2 on macOS and confirmed **by source instrumentation** that its
-  band-width table engages and returns the correct value (608 bytes for A4 at 600 dpi);
-* fed the resulting QPDL through the exact same USB path that prints HP's `rastertospl`
-  output correctly.
-
-It still comes out malformed: a striped patch of raster at the top-left of each sheet,
-the page ejects, and the printer believes another page is coming, so it repeats. The
-same raster through HP's own `rastertospl` prints a clean page over the identical
-transport. So this is an encoder problem, not transport.
-
-SpliX's HP 10x support is real, but it targets the Samsung M2020 / HP Laser 103-108 wire
-format (upstream PR #9 even notes the HP models were "not tested"), and the HP Laser
-**1008a** (HP's separate 1003-1008 series) apparently needs something more or different
-in the SPL3 page/band framing that SpliX does not emit. That is why this project uses
-HP's own codec.
-
-**Help wanted.** I built this so my family and I can print from our Macs, and I would
-love a cleaner ending. If you can pin down the exact byte-level difference between HP's
-`rastertospl` output and SpliX's for this printer (band/page records, compression
-selector, page-end / job-end opcodes), SpliX could likely be patched and colima dropped
-entirely. Issues, ideas, and PRs are very welcome.
-
-## What the installer sets up
-
-* `colima` + `docker` + `libusb` via Homebrew, and a small always-on Linux VM.
-* The `hp-spl` container image (HP's `rastertospl`, fetched from HP, not shipped here).
-* A root LaunchDaemon (`com.hpl1008.daemon`) and the `HP_Laser_1008a` print queue.
-* A login item so the Linux VM starts after a reboot (see notes below).
-
-## Notes and limitations
-
-* **First print after idle is a bit slow (about 10 to 15 seconds).** That is the
-  printer waking from its aggressive auto-power-off and heating the fuser, not the
-  software (the conversion plus USB write take about 1 second). Back-to-back pages are
-  quick.
-* **colima must be running.** The installer adds a login item to start it. On a fresh
-  reboot the very first print waits (up to about a minute) for the VM to come up rather
-  than failing, then prints. On **managed (Jamf) Macs** where `~/Library/LaunchAgents`
-  is locked, the installer falls back to a Login Item app. If it could not add one, add
-  `colima start` yourself under System Settings, General, Login Items.
-* **Different USB product id?** If `direct_write.py` says "printer not found" while
-  `ioreg -p IOUSB -l | grep -iA2 "HP Laser"` shows the device, update `PID` in
-  `~/.hp1008/direct_write.py` to the `idProduct` you see.
+* **First print after idle is slow (~10-15s).** That is the printer waking from its
+  aggressive auto-power-off and heating the fuser, not the software.
+* **Different USB product id?** If `~/.hp1008/direct_write.py` says "printer not found"
+  while `ioreg -p IOUSB -l | grep -iA2 "HP Laser"` shows the device, it auto-discovers by
+  descriptor, but you can pin `KNOWN_PIDS` in that file.
 * **Logs:** `/private/tmp/hpl1008-daemon.log`.
-
-## Legal
-
-This repo contains only glue code. It does **not** redistribute HP's driver. `install.sh`
-downloads the Unified Linux Driver from HP at install time. `rastertospl` and the PPD are
-HP's; using them to drive a printer you own is ordinary driver use.
 
 ## Credits
 
-Built by reverse-engineering the failure modes the printer itself reported. Thanks to the
-[splix](https://github.com/OpenPrinting/splix) and [foo2zjs](https://github.com/koenkooi/foo2zjs)
-projects (the SPL2/QPDL detour that proved the transport worked), Pierov's
-[HP Laser 107a on Linux](https://www.pierov.org/2023/07/25/hp-laser-107a-linux/) writeup,
-and HP's Unified Linux Driver for the actual SPL3 codec.
+Thanks to [SpliX](https://github.com/OpenPrinting/splix) (the SPL/QPDL engine), @ValdikSS
+for the HP Laser 10x support in SpliX 2.0.2, @janrueth / photovirus for the macOS build
+patch, and Pierov's [HP Laser 107a on Linux](https://www.pierov.org/2023/07/25/hp-laser-107a-linux/)
+writeup. The `300dpi-header.patch` here is the missing piece for the 1003/1008 series.
 
 ## License
 
-MIT, see [LICENSE](LICENSE).
+MIT for this glue (see [LICENSE](LICENSE)). SpliX and the patches are GPLv2.
