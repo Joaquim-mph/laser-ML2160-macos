@@ -49,18 +49,30 @@ flowchart LR
     A[Any app, Cmd-P] --> B[CUPS]
     B --> C[cgpdftoraster<br/>CUPS raster]
     C --> D[rastertoqpdl<br/>patched SpliX, C++]
-    D -->|SPL3 / QPDL| E[socket 127.0.0.1:9108]
-    E --> F[hpl1008-usbd<br/>C + IOKit, root]
-    F -->|USB bulk write| G[(HP Laser 1008a)]
+    D -->|SPL3 / QPDL| E[hpl100x backend<br/>C + IOKit, root]
+    E -->|USB bulk write| F[(HP Laser 1008a)]
 ```
 
-The one non-obvious piece is the daemon. macOS forbids USB access inside a CUPS
-filter/backend (a hardened sandbox), and on recent macOS only **root** can drive USB at
-all. Its own `usb` backend also refuses this printer (it mis-reads the port status as
-permanently "offline"). So the queue streams the finished SPL3 to a small root
-LaunchDaemon over localhost, and that daemon does the raw USB write with `IOKit`
-(`IOUSBInterfaceOpenSeize` + `WritePipe`). Everything upstream of it is a normal native
-CUPS filter.
+Two non-obvious pieces make this work:
+
+**The backend runs as root.** On recent macOS only **root** can drive USB, and the `usb`
+backend that ships with macOS refuses this printer (it mis-reads the port status as
+permanently "offline"). So the USB write lives in a small CUPS **backend** (`hpl100x:/`)
+installed `0700` root-owned: CUPS runs it as root and it does the raw write with `IOKit`
+(`IOUSBInterfaceOpenSeize` + `WritePipe`). The rest of the chain is a normal native CUPS
+filter. (The backend sandbox does permit IOKit USB; only the *filter* sandbox blocks it.)
+
+**The printer is dual-mode and macOS flips it.** Interface 0 has alt 0 = `7/1/2` (classic
+raw printing) and alt 1 = `7/1/4` (IPP-over-USB), sharing bulk-OUT endpoint `0x02`. macOS
+often leaves the interface on the IPP-USB alt, where the printer expects HTTP framing and
+silently drops raw SPL3. The backend reads the config descriptor, finds the classic
+interface/alt, and `SetAlternateInterface`s back to it before writing. Run
+`sudo /usr/libexec/cups/backend/hpl100x probe` to dump the descriptor.
+
+> Earlier versions streamed SPL3 to a root LaunchDaemon over `127.0.0.1:9108` because the
+> backend sandbox was assumed to block USB. It does not, so the socket and daemon are gone
+> (see `ROADMAP.md`, V2). The daemon variant still lives in `daemon/` + `launchd/` as a
+> fallback.
 
 ## The story
 
@@ -98,7 +110,12 @@ to JBIG. The fix (`patches/300dpi-header.patch`) decouples it and gates it on
   aggressive auto-power-off and heating the fuser, not the software.
 * **Different USB product id?** `hpl1008-usbd` matches HP vendor `0x03F0` and the classic
   printer-class interface by descriptor, so other 1003/1008 PIDs work as-is.
-* **Logs:** `/private/tmp/hpl1008-daemon.log`.
+* **Nothing prints?** Turn on CUPS debug logging (`sudo cupsctl --debug-logging`) and watch
+  `tail -f /var/log/cups/error_log` for the backend's `hpl100x:` lines. `no classic bulk-out
+  interface` means the printer re-enumerated in IPP-USB mode; the alt-setting switch handles
+  it, and `sudo /usr/libexec/cups/backend/hpl100x probe` shows the current descriptor.
+* **Logs:** the backend logs to CUPS `error_log` (via stderr); the legacy daemon logs to
+  `/private/tmp/hpl1008-daemon.log`.
 
 ## Credits
 

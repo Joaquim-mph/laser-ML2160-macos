@@ -29,10 +29,17 @@ Two things the bring-up surfaced (both fixed):
 - The backend sandbox blocks writes to `/private/tmp`, so backend-mode logging goes to
   **stderr** (CUPS captures `DEBUG:`/`ERROR:`-prefixed lines into `error_log`).
 
+A clean full A4 page printed through this path, so **the backend is now the default
+install** (`install.sh` installs `hpl100x` and removes the socket + LaunchDaemon; the
+daemon variant stays in `daemon/` + `launchd/` as a fallback). Bring-up also surfaced a
+third fix that matters for both paths: the printer is **dual-mode** (interface 0 alt 0 =
+`7/1/2` classic, alt 1 = `7/1/4` IPP-over-USB) and macOS leaves it on the IPP-USB alt,
+where raw SPL3 is silently dropped; the driver now reads the config descriptor and
+`SetAlternateInterface`s back to the classic alt before writing.
+
 Reproduce with `experiments/test-v2-backend.sh` (or `-debug.sh` for the instrumented run).
-Making the backend the *default* install (retiring `install.sh`'s socket+daemon) is the
-remaining step, pending one clean full-page run. Note: OpenPrinting considers the classic
-filter/backend model deprecated, so V4 (below) is still the long-term direction.
+Note: OpenPrinting considers the classic filter/backend model deprecated, so V4 (below) is
+still the long-term direction.
 
 ## V3 - Understand the protocol  ✅ core done
 
