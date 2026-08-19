@@ -13,14 +13,26 @@ project, it is the platform.
 
 SpliX encoder + native IOKit USB service. No Docker, VM, vendor binary, Python, or libusb.
 
-## V2 - CUPS backend instead of the socket  ✅ built (experimental)
+## V2 - CUPS backend instead of the socket  ✅ confirmed working (2026-08-19)
 
-`hpl1008-usbd.c` doubles as a CUPS backend (`hpl100x://`) when invoked by that name, doing
-the IOKit USB write directly. If the CUPS backend sandbox permits IOKit USB (Apple's own
-`usb` backend does, so it likely does), this deletes the localhost socket and the
-LaunchDaemon. Verify with `experiments/test-v2-backend.sh` (needs a sudo install + print).
-Note: OpenPrinting considers the classic filter/backend model deprecated, so this is a
-tidy-up, not the long-term architecture.
+`hpl1008-usbd.c` doubles as a CUPS backend (`hpl100x:/`) when invoked by that name, doing
+the IOKit USB write directly. **Tested and it prints:** installed as a root-owned
+(`0700`) backend at `/usr/libexec/cups/backend/hpl100x`, CUPS runs it as root and the
+backend sandbox *does* permit IOKit USB matching, interface seize, and the bulk-OUT write.
+So this route deletes both the localhost socket and the LaunchDaemon: the "USB needs root"
+constraint is satisfied by CUPS running the root-owned backend, no separate daemon needed.
+
+Two things the bring-up surfaced (both fixed):
+- CUPS invokes a print-job backend with `argv[0]` set to the **device URI** (`hpl100x:/`),
+  not the executable path. Detect backend mode from the whole `argv[0]` and the
+  `DEVICE_URI` env var, not a basename match (the URI ends in `/`).
+- The backend sandbox blocks writes to `/private/tmp`, so backend-mode logging goes to
+  **stderr** (CUPS captures `DEBUG:`/`ERROR:`-prefixed lines into `error_log`).
+
+Reproduce with `experiments/test-v2-backend.sh` (or `-debug.sh` for the instrumented run).
+Making the backend the *default* install (retiring `install.sh`'s socket+daemon) is the
+remaining step, pending one clean full-page run. Note: OpenPrinting considers the classic
+filter/backend model deprecated, so V4 (below) is still the long-term direction.
 
 ## V3 - Understand the protocol  ✅ core done
 

@@ -91,10 +91,44 @@ static IOUSBDeviceInterface **find_device(void) {
     return NULL;
 }
 
-// Open the classic printer interface (class 7, protocol 1/2) and return it plus its
-// bulk-OUT pipe reference.
+// From the config descriptor find the classic printer interface: class 7, protocol 1 or 2,
+// with a bulk-OUT endpoint. This printer is dual-mode: interface 0 has alt 0 = 7/1/2
+// (classic raw printing) and alt 1 = 7/1/4 (IPP-over-USB). macOS often leaves interface 0
+// on the IPP-USB alt, so the live interface iterator only shows proto 4. The config
+// descriptor lists every alt setting, so we can find the classic one and switch to it.
+static int find_classic_iface(IOUSBDeviceInterface **dev, UInt8 *ifaceNum, UInt8 *alt) {
+    IOUSBConfigurationDescriptorPtr cfg = NULL;
+    if ((*dev)->GetConfigurationDescriptorPtr(dev, 0, &cfg) != kIOReturnSuccess || !cfg) return 0;
+    const unsigned char *p = (const unsigned char *)cfg;
+    int total = p[2] | (p[3] << 8);
+    int curCls = -1, curProto = -1; UInt8 curIf = 0, curAlt = 0;
+    for (int i = 0; i + 2 <= total; ) {
+        int len = p[i], type = p[i + 1];
+        if (len == 0) break;
+        if (type == 4 && i + 9 <= total) {                         // interface descriptor
+            curIf = p[i + 2]; curAlt = p[i + 3]; curCls = p[i + 5]; curProto = p[i + 7];
+        } else if (type == 5 && i + 6 <= total) {                  // endpoint descriptor
+            int addr = p[i + 2], isBulk = (p[i + 3] & 3) == 2, isOut = !(addr & 0x80);
+            if (curCls == 7 && (curProto == 1 || curProto == 2) && isBulk && isOut) {
+                *ifaceNum = curIf; *alt = curAlt; return 1;        // first classic bulk-OUT wins
+            }
+        }
+        i += len;
+    }
+    return 0;
+}
+
+// Open the classic printer interface and return it plus its bulk-OUT pipe reference. When
+// the config descriptor tells us which interface/alt is the classic one, we match that
+// interface by NUMBER (its live nub may currently be on the IPP-USB alt) and force it back
+// to the classic alt with SetAlternateInterface before looking for the bulk-OUT pipe.
 static IOUSBInterfaceInterface **open_printer_interface(IOUSBDeviceInterface **dev, UInt8 *pipeOut) {
     (*dev)->USBDeviceOpenSeize(dev);   // best effort; ignore if already open
+
+    UInt8 wantIf = 0, wantAlt = 0;
+    int haveTarget = find_classic_iface(dev, &wantIf, &wantAlt);
+    if (haveTarget) logmsg("  classic printer iface = num %u alt %u (from config descriptor)", wantIf, wantAlt);
+    else            logmsg("  no classic iface in config descriptor; falling back to proto match");
 
     IOUSBFindInterfaceRequest req;
     req.bInterfaceClass    = kIOUSBFindInterfaceDontCare;
@@ -119,23 +153,30 @@ static IOUSBInterfaceInterface **open_printer_interface(IOUSBDeviceInterface **d
         IOObjectRelease(usbIf);
         if (!intf) continue;
 
-        UInt8 cls = 0, sub = 0, proto = 0, altNum = 0;
+        UInt8 cls = 0, sub = 0, proto = 0, altNum = 0, ifNum = 0;
         (*intf)->GetInterfaceClass(intf, &cls);
         (*intf)->GetInterfaceSubClass(intf, &sub);
         (*intf)->GetInterfaceProtocol(intf, &proto);
         (*intf)->GetAlternateSetting(intf, &altNum);
-        logmsg("  iface class=%u sub=%u proto=%u alt=%u", cls, sub, proto, altNum);
-        if (cls == 7 && (proto == 1 || proto == 2)) {      // printer class, classic (not IPP-USB proto 4)
+        (*intf)->GetInterfaceNumber(intf, &ifNum);
+        logmsg("  iface num=%u class=%u sub=%u proto=%u alt=%u", ifNum, cls, sub, proto, altNum);
+
+        // Target the classic interface by number when we know it (its nub may be on the
+        // IPP-USB alt right now); otherwise fall back to the old class/proto match.
+        int isTarget = haveTarget ? (ifNum == wantIf) : (cls == 7 && (proto == 1 || proto == 2));
+        if (isTarget) {
             IOReturn ir = (*intf)->USBInterfaceOpenSeize(intf);
             if (ir == kIOReturnSuccess) {
-                (*intf)->SetAlternateInterface(intf, altNum);   // make sure it's active
+                UInt8 useAlt = haveTarget ? wantAlt : altNum;
+                IOReturn ar = (*intf)->SetAlternateInterface(intf, useAlt);   // force classic (raw) alt
+                logmsg("  SetAlternateInterface(%u) -> 0x%08x", useAlt, ar);
                 UInt8 n = 0; (*intf)->GetNumEndpoints(intf, &n);
                 for (UInt8 pipe = 1; pipe <= n; pipe++) {
                     UInt8 dir = 0, num = 0, tt = 0, interval = 0; UInt16 mps = 0;
                     (*intf)->GetPipeProperties(intf, pipe, &dir, &num, &tt, &mps, &interval);
                     if (dir == kUSBOut && tt == kUSBBulk) {
                         *pipeOut = pipe; result = intf;
-                        logmsg("  -> using bulk-out pipe %u (ep 0x%02x)", pipe, num);
+                        logmsg("  -> using bulk-out pipe %u (ep 0x%02x) on iface %u alt %u", pipe, num, ifNum, useAlt);
                         break;
                     }
                 }
@@ -174,6 +215,39 @@ static int usb_write(const unsigned char *data, size_t len) {
     return 1;
 }
 
+// Dump the raw configuration descriptor: every interface, every alternate setting, and
+// every endpoint. macOS only creates a nub for each interface's *active* alt setting, so
+// the live interface iterator can miss the classic 7/1/2 bulk interface when the printer
+// is currently in IPP-USB (7/1/4) mode. The config descriptor lists them all.
+static int usb_probe(void) {
+    IOUSBDeviceInterface **dev = find_device();
+    if (!dev) { printf("printer not found (run with sudo)\n"); return 1; }
+    UInt8 nconf = 0; (*dev)->GetNumberOfConfigurations(dev, &nconf);
+    IOUSBConfigurationDescriptorPtr cfg = NULL;
+    if ((*dev)->GetConfigurationDescriptorPtr(dev, 0, &cfg) != kIOReturnSuccess || !cfg) {
+        printf("cannot read config descriptor\n"); (*dev)->Release(dev); return 1;
+    }
+    const unsigned char *p = (const unsigned char *)cfg;
+    int total = p[2] | (p[3] << 8);                 // wTotalLength (LE)
+    printf("configs=%u  bConfigurationValue=%u  bNumInterfaces=%u  wTotalLength=%d\n",
+           nconf, p[5], p[4], total);
+    for (int i = 0; i + 2 <= total; ) {
+        int len = p[i], type = p[i + 1];
+        if (len == 0) break;
+        if (type == 4 && i + 9 <= total)            // interface descriptor
+            printf("  IFACE num=%u alt=%u  class=%u sub=%u proto=%u  nEndpoints=%u\n",
+                   p[i+2], p[i+3], p[i+5], p[i+6], p[i+7], p[i+4]);
+        else if (type == 5 && i + 6 <= total) {     // endpoint descriptor
+            int addr = p[i+2], attr = p[i+3] & 3;
+            const char *tt = attr==2?"bulk":attr==3?"intr":attr==1?"iso":"ctrl";
+            printf("      EP 0x%02x %-3s %s\n", addr, (addr & 0x80) ? "IN" : "OUT", tt);
+        }
+        i += len;
+    }
+    (*dev)->Release(dev);
+    return 0;
+}
+
 static unsigned char *read_all(int fd, size_t *outlen) {
     size_t cap = 1 << 20, len = 0;
     unsigned char *buf = malloc(cap);
@@ -189,6 +263,10 @@ static unsigned char *read_all(int fd, size_t *outlen) {
 }
 
 int main(int argc, char **argv) {
+    // --- probe mode: dump the USB config descriptor (needs root) ---
+    if (argc == 2 && (!strcmp(argv[1], "probe") || !strcmp(argv[1], "--probe")))
+        return usb_probe();
+
     // --- CUPS backend mode (installed as /usr/libexec/cups/backend/hpl100x) ---
     // Deletes the socket + LaunchDaemon: CUPS invokes this as the device transport
     // stage directly. argv = job user title copies options [file]; job data on stdin.
