@@ -17,6 +17,7 @@
 #include <stdarg.h>
 #include <unistd.h>
 #include <time.h>
+#include <fcntl.h>
 #include <sys/socket.h>
 #include <netinet/in.h>
 #include <arpa/inet.h>
@@ -176,6 +177,27 @@ static unsigned char *read_all(int fd, size_t *outlen) {
 }
 
 int main(int argc, char **argv) {
+    const char *base = strrchr(argv[0], '/'); base = base ? base + 1 : argv[0];
+
+    // --- CUPS backend mode (installed as /usr/libexec/cups/backend/hpl100x) ---
+    // Deletes the socket + LaunchDaemon: CUPS invokes this as the device transport
+    // stage directly. argv = job user title copies options [file]; job data on stdin.
+    if (strstr(base, "hpl100x")) {
+        if (argc == 1) {   // discovery
+            printf("direct hpl100x:/ \"HP Laser 1008a\" \"HP Laser 1003-1008 (native IOKit)\" "
+                   "\"MFG:HP;MDL:HP Laser 1003-1008;\"\n");
+            return 0;
+        }
+        int infd = 0;                                  // stdin by default
+        if (argc >= 7 && argv[6][0]) { infd = open(argv[6], O_RDONLY); if (infd < 0) { logmsg("backend: cannot open %s", argv[6]); return 1; } }
+        size_t len = 0; unsigned char *data = read_all(infd, &len);
+        if (infd) close(infd);
+        logmsg("backend: %zu bytes", len);
+        int rc = (data && len) ? usb_write(data, len) : 1;
+        free(data);
+        return rc ? 1 : 0;                             // CUPS_BACKEND_FAILED / CUPS_BACKEND_OK
+    }
+
     if (argc == 2) {                                   // one-shot test mode
         FILE *f = fopen(argv[1], "rb");
         if (!f) { perror("open"); return 2; }
