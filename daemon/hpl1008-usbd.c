@@ -30,13 +30,25 @@
 #define PORT    9108
 #define LOGPATH "/private/tmp/hpl1008-daemon.log"
 
+// In CUPS backend mode we log to stderr instead of a file: the backend sandbox blocks
+// writes to /private/tmp, but CUPS captures backend stderr into error_log. Lines prefixed
+// with "DEBUG:" (and "ERROR:") are parsed by cupsd, so diagnostics survive the sandbox.
+static int g_backend = 0;
+
 static void logmsg(const char *fmt, ...) {
+    va_list ap;
+    if (g_backend) {
+        fputs("DEBUG: hpl100x: ", stderr);
+        va_start(ap, fmt); vfprintf(stderr, fmt, ap); va_end(ap);
+        fputc('\n', stderr); fflush(stderr);
+        return;
+    }
     FILE *f = fopen(LOGPATH, "a");
     if (!f) return;
     time_t t = time(NULL);
     char ts[32]; strftime(ts, sizeof ts, "%F %T", localtime(&t));
     fprintf(f, "%s ", ts);
-    va_list ap; va_start(ap, fmt); vfprintf(f, fmt, ap); va_end(ap);
+    va_start(ap, fmt); vfprintf(f, fmt, ap); va_end(ap);
     fputc('\n', f); fclose(f);
 }
 
@@ -183,6 +195,7 @@ int main(int argc, char **argv) {
     // Deletes the socket + LaunchDaemon: CUPS invokes this as the device transport
     // stage directly. argv = job user title copies options [file]; job data on stdin.
     if (strstr(base, "hpl100x")) {
+        g_backend = 1;     // route all logmsg() to stderr (sandbox blocks the /tmp log)
         if (argc == 1) {   // discovery
             printf("direct hpl100x:/ \"HP Laser 1008a\" \"HP Laser 1003-1008 (native IOKit)\" "
                    "\"MFG:HP;MDL:HP Laser 1003-1008;\"\n");
