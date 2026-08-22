@@ -118,18 +118,14 @@ static int find_classic_iface(IOUSBDeviceInterface **dev, UInt8 *ifaceNum, UInt8
     return 0;
 }
 
-// Open the classic printer interface and return it plus its bulk-OUT pipe reference. When
-// the config descriptor tells us which interface/alt is the classic one, we match that
-// interface by NUMBER (its live nub may currently be on the IPP-USB alt) and force it back
-// to the classic alt with SetAlternateInterface before looking for the bulk-OUT pipe.
-static IOUSBInterfaceInterface **open_printer_interface(IOUSBDeviceInterface **dev, UInt8 *pipeOut) {
-    (*dev)->USBDeviceOpenSeize(dev);   // best effort; ignore if already open
-
-    UInt8 wantIf = 0, wantAlt = 0;
-    int haveTarget = find_classic_iface(dev, &wantIf, &wantAlt);
-    if (haveTarget) logmsg("  classic printer iface = num %u alt %u (from config descriptor)", wantIf, wantAlt);
-    else            logmsg("  no classic iface in config descriptor; falling back to proto match");
-
+// Scan the device's interfaces and seize the classic printer interface, returning it plus
+// its bulk-OUT pipe. Sets *sawExclusive when a seize fails with kIOReturnExclusiveAccess
+// (macOS's IPP-USB driver holding the interface), which the caller resolves by resetting the
+// configuration. Matches the classic interface by NUMBER (its live nub may be on the IPP-USB
+// alt) and forces the classic alt with SetAlternateInterface before finding the bulk-OUT.
+static IOUSBInterfaceInterface **scan_and_seize(IOUSBDeviceInterface **dev, int haveTarget,
+                                                UInt8 wantIf, UInt8 wantAlt, UInt8 *pipeOut,
+                                                int *sawExclusive) {
     IOUSBFindInterfaceRequest req;
     req.bInterfaceClass    = kIOUSBFindInterfaceDontCare;
     req.bInterfaceSubClass = kIOUSBFindInterfaceDontCare;
@@ -183,13 +179,45 @@ static IOUSBInterfaceInterface **open_printer_interface(IOUSBDeviceInterface **d
                 if (result) break;
                 (*intf)->USBInterfaceClose(intf);
             } else {
-                logmsg("  seize failed 0x%08x", ir);
+                if (ir == kIOReturnExclusiveAccess) *sawExclusive = 1;
+                logmsg("  seize failed 0x%08x%s", ir,
+                       ir == kIOReturnExclusiveAccess ? " (interface held by macOS)" : "");
             }
         }
         (*intf)->Release(intf);
     }
     IOObjectRelease(iter);
     return result;
+}
+
+// Open the classic printer interface and return it plus its bulk-OUT pipe reference. If
+// macOS's IPP-USB driver holds the interface exclusively (kIOReturnExclusiveAccess, which
+// happens whenever the printer comes up on the IPP-USB alt), reset the device configuration
+// to detach that driver and retry: SetConfiguration reinitialises the interfaces to alt 0
+// and drops the other driver's claim, after which we can seize the classic interface.
+static IOUSBInterfaceInterface **open_printer_interface(IOUSBDeviceInterface **dev, UInt8 *pipeOut) {
+    (*dev)->USBDeviceOpenSeize(dev);   // best effort; ignore if already open
+
+    UInt8 wantIf = 0, wantAlt = 0;
+    int haveTarget = find_classic_iface(dev, &wantIf, &wantAlt);
+    if (haveTarget) logmsg("  classic printer iface = num %u alt %u (from config descriptor)", wantIf, wantAlt);
+    else            logmsg("  no classic iface in config descriptor; falling back to proto match");
+
+    for (int pass = 0; pass < 2; pass++) {
+        int sawExclusive = 0;
+        IOUSBInterfaceInterface **result = scan_and_seize(dev, haveTarget, wantIf, wantAlt, pipeOut, &sawExclusive);
+        if (result) return result;
+        if (pass == 0 && sawExclusive) {
+            UInt8 cfg = 0;
+            if ((*dev)->GetConfiguration(dev, &cfg) != kIOReturnSuccess || cfg == 0) cfg = 1;
+            IOReturn cr = (*dev)->SetConfiguration(dev, cfg);   // detach macOS's IPP-USB driver
+            logmsg("  resetting configuration (%u) to reclaim the interface -> 0x%08x", cfg, cr);
+            usleep(300000);   // let the interface nubs settle after re-config
+            continue;
+        }
+        break;
+    }
+    return NULL;
 }
 
 static int usb_write(const unsigned char *data, size_t len) {

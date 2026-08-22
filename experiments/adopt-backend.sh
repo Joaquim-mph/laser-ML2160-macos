@@ -20,10 +20,12 @@ echo "==> removing the old socket LaunchDaemon (if present)"
 sudo launchctl bootout system/com.hpl1008.daemon 2>/dev/null || true
 sudo rm -f /Library/LaunchDaemons/com.hpl1008.daemon.plist /usr/local/bin/hpl1008-daemon
 
-echo "==> turning debug logging back off"
-sudo cupsctl --no-debug-logging || true
-
 echo "==> test print via the main queue"
 lp -d HP_Laser_1008a "$HERE/testpage.txt"
+sleep 6
+
+# Only quiet the logs once the test print has gone through, so a failure stays diagnosable.
+echo "==> turning debug logging back off"
+sudo cupsctl --no-debug-logging || true
 echo
 echo "Done. 'HP Laser 1008a' now prints via the native backend. No socket, no daemon."
