@@ -55,6 +55,13 @@ lpadmin -p HP_Laser_1008a -E -v "hpl100x:/" -P "$HP1008/laser10x.ppd" \
         -o printer-is-shared=false -D "HP Laser 1008a" -L "USB (native SPL3)"
 lpoptions -d HP_Laser_1008a >/dev/null
 
+say "Disabling macOS's IPP-over-USB bridge for this printer..."
+# macOS auto-starts /usr/libexec/ippusbd for the printer and opens its USB interface
+# exclusively (driverless AirPrint), which blocks our raw backend (kIOReturnExclusiveAccess)
+# and pauses the queue. We print over the classic SPL3 interface, so disable that bridge.
+# Persists across reboots/replug; uninstall.sh re-enables it. See tools/disable-ippusb.sh.
+sudo bash "$REPO_DIR/tools/disable-ippusb.sh" || true
+
 say "Done. Print to 'HP Laser 1008a' from any app (Cmd-P)."
 echo "Quick test:  lp -d HP_Laser_1008a /etc/hosts"
 echo "USB map:     sudo /usr/libexec/cups/backend/hpl100x probe   (dumps the device descriptor)"

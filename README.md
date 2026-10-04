@@ -36,9 +36,11 @@ Plug the printer in over USB, then paste this into Terminal:
 git clone https://github.com/Kuberwastaken/hp-laser-1008a-macos.git && cd hp-laser-1008a-macos && ./install.sh
 ```
 
-It asks for your password once, builds the two native binaries, and sets up the printer
-as **"HP Laser 1008a"**. Print from any app with `Cmd-P`. Prerequisites: [Homebrew](https://brew.sh)
-and the Xcode command line tools (`xcode-select --install`), both build-time only.
+It asks for your password once, builds the two native binaries, sets up the printer as
+**"HP Laser 1008a"**, and disables macOS's conflicting IPP-over-USB bridge for it (see
+[How it works](#how-it-works)). Print from any app with `Cmd-P`. Prerequisites:
+[Homebrew](https://brew.sh) and the Xcode command line tools (`xcode-select --install`),
+both build-time only.
 
 Test from the terminal: `lp -d HP_Laser_1008a /etc/hosts`. Remove everything: `./uninstall.sh`.
 
@@ -68,6 +70,19 @@ often leaves the interface on the IPP-USB alt, where the printer expects HTTP fr
 silently drops raw SPL3. The backend reads the config descriptor, finds the classic
 interface/alt, and `SetAlternateInterface`s back to it before writing. Run
 `sudo /usr/libexec/cups/backend/hpl100x probe` to dump the descriptor.
+
+**macOS grabs the interface first (`ippusbd`).** Because the printer advertises the
+IPP-over-USB alt, macOS auto-starts `/usr/libexec/ippusbd` for it (a per-device launchd job,
+`com.apple.print.ippusb.<mfg>.<model>.<serial>`) and opens the USB interface *exclusively* to
+expose it as a driverless AirPrint device. Our backend then loses the seize with
+`kIOReturnExclusiveAccess` (`0xe00002c5`) — on the device open itself — the job fails and CUPS
+pauses the queue. The backend can't recover from inside: the CUPS backend sandbox hides other
+processes (it can't find, let alone kill, `ippusbd`), and `SetConfiguration`/`USBDeviceReEnumerate`
+need a device handle the exclusive lock denies. So `install.sh` disables that per-device bridge
+(`tools/disable-ippusb.sh`, via `launchctl disable`), which persists across reboots and
+replug/wake; `uninstall.sh --undo`s it. With the bridge gone the interface stays free and the
+backend seizes it on the first try. (We lose nothing: this printer's driverless IPP-USB output
+is the garbled path this project exists to replace.)
 
 > Earlier versions streamed SPL3 to a root LaunchDaemon over `127.0.0.1:9108` because the
 > backend sandbox was assumed to block USB. It does not, so the socket and daemon are gone
@@ -111,9 +126,14 @@ to JBIG. The fix (`patches/300dpi-header.patch`) decouples it and gates it on
 * **Different USB product id?** `hpl1008-usbd` matches HP vendor `0x03F0` and the classic
   printer-class interface by descriptor, so other 1003/1008 PIDs work as-is.
 * **Nothing prints?** Turn on CUPS debug logging (`sudo cupsctl --debug-logging`) and watch
-  `tail -f /var/log/cups/error_log` for the backend's `hpl100x:` lines. `no classic bulk-out
-  interface` means the printer re-enumerated in IPP-USB mode; the alt-setting switch handles
-  it, and `sudo /usr/libexec/cups/backend/hpl100x probe` shows the current descriptor.
+  `tail -f /var/log/cups/error_log` for the backend's `hpl100x:` lines.
+  * `seize failed 0x…02c5 (interface held by macOS)` means macOS's `ippusbd` re-grabbed the
+    interface (e.g. after an OS update re-enabled the bridge). Re-run `sudo tools/disable-ippusb.sh`
+    then `cupsenable HP_Laser_1008a`.
+  * `no classic bulk-out interface` means the printer re-enumerated in IPP-USB mode; the
+    alt-setting switch handles it, and `sudo /usr/libexec/cups/backend/hpl100x probe` shows
+    the current descriptor.
+  * A queue stuck `disabled`/paused after a past failure just needs `cupsenable HP_Laser_1008a`.
 * **Logs:** the backend logs to CUPS `error_log` (via stderr); the legacy daemon logs to
   `/private/tmp/hpl1008-daemon.log`.
 

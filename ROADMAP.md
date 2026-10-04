@@ -41,6 +41,30 @@ Reproduce with `experiments/test-v2-backend.sh` (or `-debug.sh` for the instrume
 Note: OpenPrinting considers the classic filter/backend model deprecated, so V4 (below) is
 still the long-term direction.
 
+## V2.1 - macOS's ippusbd steals the interface  ✅ fixed (2026-10-04)
+
+A unit that had been printing stopped: every job failed with `seize failed 0xe00002c5
+(interface held by macOS)` and CUPS paused the queue. Cause: macOS auto-starts
+`/usr/libexec/ippusbd` for this printer (a per-device launchd job,
+`com.apple.print.ippusb.<mfg>.<model>.<serial>`, submitted by `smd` on device enumeration)
+and opens the USB interface **exclusively** to expose it as a driverless AirPrint device.
+Our backend then can't seize it — in fact `USBDeviceOpenSeize` on the device itself returns
+`kIOReturnExclusiveAccess`.
+
+Things that did **not** work, and why:
+- **Reclaim from inside the backend** (`SetConfiguration`, then `USBDeviceReEnumerate`): both
+  need an open device handle, which the exclusive lock denies (`kIOReturnNotOpen`).
+- **Kill `ippusbd` from inside the backend**: the CUPS backend sandbox hides other processes —
+  `proc_listpids` returns no `ippusbd` — so the backend can't find or signal it. (The eviction
+  code stays in `hpl1008-usbd.c`; it still works in the non-sandboxed one-shot/daemon modes and
+  self-documents the attempt.)
+
+What works: **disable the per-device ippusb launchd job** (`tools/disable-ippusb.sh`, run from
+`install.sh`; `uninstall.sh --undo`). `launchctl disable` records the label in the persistent
+disabled overrides, so the bridge stays gone across reboots and replug/wake, and the backend
+seizes the free classic interface on the first attempt. We lose only macOS's driverless IPP-USB
+for this printer — which is the garbled output this project exists to replace.
+
 ## V3 - Understand the protocol  ✅ core done
 
 - `tools/spl3dump.py` parses any SPL3/QPDL-v3 stream (verified against HP and native output).
