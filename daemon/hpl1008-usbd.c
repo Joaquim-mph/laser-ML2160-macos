@@ -21,6 +21,10 @@
 #include <sys/socket.h>
 #include <netinet/in.h>
 #include <arpa/inet.h>
+#include <signal.h>
+#include <errno.h>
+#include <libproc.h>
+#include <sys/param.h>
 #include <CoreFoundation/CoreFoundation.h>
 #include <IOKit/IOKitLib.h>
 #include <IOKit/IOCFPlugIn.h>
@@ -190,38 +194,89 @@ static IOUSBInterfaceInterface **scan_and_seize(IOUSBDeviceInterface **dev, int 
     return result;
 }
 
+// macOS's ippusbd daemon opens this printer's USB interface exclusively to bridge it as a
+// driverless IPP-over-USB device, which blocks our raw seize - the device open itself fails
+// with kIOReturnExclusiveAccess, so SetConfiguration/ReEnumerate (which need an open handle)
+// cannot pry it loose. We drive the printer through its classic SPL3 interface instead, so
+// when we find it held, terminate ippusbd: launchd does not immediately respawn it, which
+// leaves us the window to seize. The backend runs as root, so the signal is permitted; killed
+// is the number of ippusbd processes we signalled.
+static int evict_ippusbd(void) {
+    int cap = proc_listpids(PROC_ALL_PIDS, 0, NULL, 0);
+    if (cap <= 0) return 0;
+    pid_t *pids = calloc((size_t)cap, sizeof(pid_t));
+    if (!pids) return 0;
+    int n = proc_listpids(PROC_ALL_PIDS, 0, pids, cap * (int)sizeof(pid_t)) / (int)sizeof(pid_t);
+    int killed = 0;
+    char name[2 * MAXCOMLEN + 1];
+    for (int i = 0; i < n; i++) {
+        if (pids[i] <= 0) continue;
+        if (proc_name(pids[i], name, sizeof name) <= 0) continue;
+        if (strcmp(name, "ippusbd") != 0) continue;
+        if (kill(pids[i], SIGKILL) == 0) { killed++; logmsg("  evicted ippusbd (pid %d)", pids[i]); }
+        else logmsg("  kill(ippusbd pid %d) failed: %s", pids[i], strerror(errno));
+    }
+    free(pids);
+    if (!killed) logmsg("  no ippusbd process to evict (interface held by something else?)");
+    return killed;
+}
+
 // Open the classic printer interface and return it plus its bulk-OUT pipe reference. If
-// macOS's IPP-USB driver holds the interface exclusively (kIOReturnExclusiveAccess, which
-// happens whenever the printer comes up on the IPP-USB alt), reset the device configuration
-// to detach that driver and retry: SetConfiguration reinitialises the interfaces to alt 0
-// and drops the other driver's claim, after which we can seize the classic interface.
+// macOS's IPP-USB driver (ippusbd) holds the device/interface exclusively, evict it and
+// retry; as a deeper fallback, reset the device configuration and re-enumerate (both need
+// the device open) to drop the other driver's claim and return on the classic alt 0.
 static IOUSBInterfaceInterface **open_printer_interface(IOUSBDeviceInterface **dev, UInt8 *pipeOut) {
-    (*dev)->USBDeviceOpenSeize(dev);   // best effort; ignore if already open
+    IOReturn od = (*dev)->USBDeviceOpenSeize(dev);
+    if (od == kIOReturnExclusiveAccess && evict_ippusbd()) {
+        // ippusbd had the device open; it is now gone, so retry the open before it respawns.
+        for (int i = 0; i < 6 && od != kIOReturnSuccess; i++) {
+            usleep(300000);
+            od = (*dev)->USBDeviceOpenSeize(dev);
+        }
+        logmsg("  USBDeviceOpenSeize after evicting ippusbd -> 0x%08x", od);
+    } else if (od != kIOReturnSuccess) {
+        IOReturn o2 = (*dev)->USBDeviceOpen(dev);
+        logmsg("  USBDeviceOpenSeize -> 0x%08x; USBDeviceOpen -> 0x%08x", od, o2);
+    }
 
     UInt8 wantIf = 0, wantAlt = 0;
     int haveTarget = find_classic_iface(dev, &wantIf, &wantAlt);
     if (haveTarget) logmsg("  classic printer iface = num %u alt %u (from config descriptor)", wantIf, wantAlt);
     else            logmsg("  no classic iface in config descriptor; falling back to proto match");
 
-    for (int pass = 0; pass < 2; pass++) {
-        int sawExclusive = 0;
-        IOUSBInterfaceInterface **result = scan_and_seize(dev, haveTarget, wantIf, wantAlt, pipeOut, &sawExclusive);
-        if (result) return result;
-        if (pass == 0 && sawExclusive) {
-            UInt8 cfg = 0;
-            if ((*dev)->GetConfiguration(dev, &cfg) != kIOReturnSuccess || cfg == 0) cfg = 1;
-            IOReturn cr = (*dev)->SetConfiguration(dev, cfg);   // detach macOS's IPP-USB driver
-            logmsg("  resetting configuration (%u) to reclaim the interface -> 0x%08x", cfg, cr);
-            usleep(300000);   // let the interface nubs settle after re-config
-            continue;
+    int sawExclusive = 0;
+    IOUSBInterfaceInterface **result = scan_and_seize(dev, haveTarget, wantIf, wantAlt, pipeOut, &sawExclusive);
+    if (result) return result;
+
+    // macOS's IPP-USB driver holds the interface. Try, in order of escalation, to pry it
+    // loose: SetConfiguration (detaches interface drivers), then a full device re-enumerate
+    // (drops the device off the bus and back, so it returns on its default alt 0 = classic).
+    // Both need the device open; log what actually succeeds so we can see macOS's limits.
+    if (sawExclusive) {
+        // The device opened but ippusbd still holds the interface nub: evict it and re-scan
+        // before falling back to the heavier config-reset / re-enumerate escalation.
+        if (evict_ippusbd()) {
+            usleep(300000);
+            result = scan_and_seize(dev, haveTarget, wantIf, wantAlt, pipeOut, &sawExclusive);
+            if (result) return result;
         }
-        break;
+        UInt8 cfg = 0;
+        if ((*dev)->GetConfiguration(dev, &cfg) != kIOReturnSuccess || cfg == 0) cfg = 1;
+        IOReturn cr = (*dev)->SetConfiguration(dev, cfg);
+        logmsg("  SetConfiguration(%u) -> 0x%08x", cfg, cr);
+        if (cr == kIOReturnSuccess) {
+            usleep(300000);
+            result = scan_and_seize(dev, haveTarget, wantIf, wantAlt, pipeOut, &sawExclusive);
+            if (result) return result;
+        }
+        IOReturn rr = (*dev)->USBDeviceReEnumerate(dev, 0);   // hard reset to default alt
+        logmsg("  USBDeviceReEnumerate -> 0x%08x (device will re-appear; retrying fresh)", rr);
     }
-    return NULL;
+    return NULL;   // usb_write() re-finds the device and retries
 }
 
 static int usb_write(const unsigned char *data, size_t len) {
-    for (int attempt = 1; attempt <= 5; attempt++) {
+    for (int attempt = 1; attempt <= 10; attempt++) {   // extra headroom: re-enumerate drops the device off the bus and back
         IOUSBDeviceInterface **dev = find_device();
         if (!dev) { logmsg("printer not found; waiting..."); sleep(2); continue; }
         UInt8 pipe = 0;
