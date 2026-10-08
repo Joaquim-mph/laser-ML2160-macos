@@ -1,3 +1,22 @@
+# Samsung ML-2160 on macOS
+
+The ML-2160 works with **Samsung's own Universal Print Driver** over plain USB. The HP/SpliX
+code below is not needed for it.
+
+Samsung's driver (UPD 3.93) has a bug. Its `rastertosec` filter crashes (`atoi(NULL)` in
+`GeneratePJL`) unless the PPD marks an `Option4`, `MassStorage` or `FlashDrive` choice, and the
+ML-2160 PPD has none of them, so every job fails with **"Filter failed"**. The fix adds a
+harmless `Option4` ("Mass Storage: Not Installed") to the queue's PPD.
+
+1. Plug in the printer and add it in System Settings → Printers & Scanners (Samsung driver).
+2. Run `./fix-ml2160.sh` (safe to run more than once).
+3. Print with `Cmd-P` → **Samsung ML-2160 Series**.
+
+Run `./fix-ml2160.sh` again after you remove and re-add the printer, because re-adding it
+restores Samsung's original PPD.
+
+---
+
 # HP Laser 1008a on macOS (native Cmd-P driver)
 
 Make the **HP Laser 1003 / 1006 / 1008 (a/w)**, HP's rebadged Samsung SPL3 laser, print
